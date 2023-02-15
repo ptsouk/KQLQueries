@@ -1,0 +1,61 @@
+let timerange = 7d;
+// fetch interesting logs
+let logs = materialize (OfficeActivity
+    | where TimeGenerated > ago(timerange)
+    | where OfficeWorkload == "Exchange"
+    | where RecordType == "ExchangeAdmin"
+    | where Operation in ("Remove-MailboxPermission", "Add-MailboxPermission", "Add-RecipientPermission", "Remove-RecipientPermission")
+    | where ExternalAccess == "False"
+    | extend Params = parse_json(Parameters)
+    | project
+        Start_Time,
+        Operation,
+        Actor=UserId,
+        Params,
+        SourceRecordId);
+// fetch identity info records        
+let identityInfo = IdentityInfo
+    | where TimeGenerated > ago(30d)
+    | summarize arg_max(TimeGenerated, *) by AccountObjectId
+    | where isnotempty(AccountSID) // not all records have AccountSID
+    | project AccountObjectId, AccountSID, AccountUPN; 
+// convert params to rows and columns           
+let paramList = logs
+    | mv-expand Params
+    | evaluate bag_unpack(Params, 'Param_') 
+    | summarize d=make_bag(pack(Param_Name, tostring(Param_Value))) by SourceRecordId
+    | evaluate bag_unpack(d);
+// construct regex for guid (AccountObjectId) and SID (AccountSID)
+let guidRegex = "(\\{){0,1}[0-9a-fA-F]{8}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{12}(\\}){0,1}";
+let sidRegex = "^S-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}$";
+logs
+| join kind=innerunique paramList on SourceRecordId
+| project-away Params, SourceRecordId, SourceRecordId1
+// lookup with Identity on AccountObjectId
+| extend Identity = column_ifexists("Identity", "") // construct the column if params does not have it
+| lookup kind=leftouter identityInfo on $left.Identity == $right.AccountObjectId
+| extend Identity = iff(Identity matches regex guidRegex, Identity=iff(isnotempty(AccountUPN), AccountUPN, Identity), Identity)
+| project-away AccountUPN, AccountSID
+// lookup with Identity on AccountSID
+| lookup kind=leftouter identityInfo on $left.Identity == $right.AccountSID
+| extend Identity = iff(Identity matches regex sidRegex, Identity=iff(isnotempty(AccountUPN), AccountUPN, Identity), Identity)
+| project-away AccountUPN, AccountObjectId
+// lookup with User on AccountObjectId
+| extend User = column_ifexists("User", "") // construct the column if params does not have it
+| lookup kind=leftouter identityInfo on $left.User == $right.AccountObjectId
+| extend User = iff(User matches regex guidRegex, User=iff(isnotempty(AccountUPN), AccountUPN, User), User)
+| project-away AccountUPN, AccountSID
+// lookup with User on AccountSID
+| lookup kind=leftouter identityInfo on $left.User == $right.AccountSID
+| extend User = iff(User matches regex sidRegex, User=iff(isnotempty(AccountUPN), AccountUPN, User), User)
+| project-away AccountUPN, AccountObjectId
+// lookup with Trustee on AccountObjectId 
+| extend Trustee = column_ifexists("Trustee", "") // construct the column if params does not have it
+| lookup kind=leftouter identityInfo on $left.Trustee == $right.AccountObjectId
+| extend Trustee = iff(Trustee matches regex guidRegex, Trustee=iff(isnotempty(AccountUPN), AccountUPN, Trustee), Trustee)
+| project-away AccountUPN, AccountSID
+// lookup with Trustee on AccountSID 
+| lookup kind=leftouter identityInfo on $left.Trustee == $right.AccountSID
+| extend Trustee = iff(Trustee matches regex sidRegex, Trustee=iff(isnotempty(AccountUPN), AccountUPN, Trustee), Trustee)
+| project-away AccountUPN, AccountObjectId
+| sort by Start_Time desc

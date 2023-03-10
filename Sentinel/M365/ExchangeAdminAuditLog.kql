@@ -1,4 +1,13 @@
 let timerange = 7d;
+let filler = datatable (
+    Start_Time: datetime,
+    Operation: string,
+    Actor: string,
+    Params: dynamic,
+    SourceRecordId: string
+) [ 
+    datetime(9999-12-31), "null", "null", dynamic({"Name": "value1", "Value": "value2"}), "null"
+];
 // fetch interesting logs
 let logs = materialize (OfficeActivity
     | where TimeGenerated > ago(timerange)
@@ -21,10 +30,12 @@ let identityInfo = IdentityInfo
     | project AccountObjectId, AccountSID, AccountUPN; 
 // convert params to rows and columns           
 let paramList = logs
+    | union filler
     | mv-expand Params
     | evaluate bag_unpack(Params, 'Param_') 
     | summarize d=make_bag(pack(Param_Name, tostring(Param_Value))) by SourceRecordId
-    | evaluate bag_unpack(d);
+    | evaluate bag_unpack(d)
+    | where SourceRecordId != "null";
 // construct regex for guid (AccountObjectId) and SID (AccountSID)
 let guidRegex = "(\\{){0,1}[0-9a-fA-F]{8}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{4}\\-[0-9a-fA-F]{12}(\\}){0,1}";
 let sidRegex = "^S-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}-\\d{1,10}$";
